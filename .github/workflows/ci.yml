@@ -1,0 +1,37 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # Tooling needs a current Node; the packed CLI is smoke-tested on each supported runtime.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Packed CLI installs alone and runs
+        run: |
+          TGZ="$(npm pack --silent | tail -1)"
+          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null
+          npm i "$GITHUB_WORKSPACE/$TGZ" >/dev/null
+          npx vermin --version
+          npx vermin --help | grep -q "Usage: vermin"
+          set +e; VERMIN_API_KEY= VERMIN_CONFIG=/tmp/none.json npx vermin scrape https://example.com; code=$?; set -e
+          [ "$code" = "3" ] || { echo "expected exit 3 without a key, got $code"; exit 1; }
