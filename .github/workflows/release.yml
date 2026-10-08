@@ -1,22 +1,27 @@
 name: Release
-# Publishes @vermin/cli to npm with provenance when a `v<version>` tag is pushed.
-# Needs the NPM_TOKEN secret (an npm automation token with publish rights on @vermin).
+# Publishes @vermin/cli to npm when a `v<version>` tag is pushed, using npm
+# trusted publishing (OIDC): no npm token is stored anywhere. npm adds the
+# provenance attestation automatically. Configured on npmjs.com under
+# @vermin/cli → Settings → Trusted Publisher (reshapify/vermin-cli, release.yml).
 on:
   push:
     tags: ["v*"]
 permissions:
-  contents: write
-  id-token: write # npm provenance
+  contents: read
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # GitHub release
+      id-token: write # npm trusted publishing (OIDC)
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-          cache: npm
+          # Trusted publishing needs Node ≥ 22.14 and npm ≥ 11.5.1.
+          node-version: "24"
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false # never use caching in release builds
       - run: npm ci
       - name: Check tag matches package version
         run: |
@@ -24,9 +29,7 @@ jobs:
           PKG="$(node -p "require('./package.json').version")"
           [ "$VERSION" = "$PKG" ] || { echo "Tag $VERSION != package.json $PKG"; exit 1; }
       - run: npm run typecheck && npm test && npm run build
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public
       - name: GitHub release
         run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
         env:
