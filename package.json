@@ -1,7 +1,7 @@
 {
   "name": "@vermin/cli",
-  "version": "0.1.1",
-  "description": "The Vermin command line: turn any website into clean, LLM-ready markdown and brand data from your terminal or agent.",
+  "version": "0.2.0",
+  "description": "The Vermin command line: turn any website into clean, LLM-ready markdown, search results, structured JSON and brand data from your terminal or agent.",
   "license": "MIT",
   "homepage": "https://vermin.dev/docs/cli",
   "repository": {

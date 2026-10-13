@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -115,6 +115,100 @@ describe("map and brand", () => {
     expect(r.stdout).toContain("**Acme** (acme.com)");
     expect(r.stderr).toContain("cached");
     expect(new URL(h.calls[0]!.url).searchParams.get("domain")).toBe("acme.com");
+  });
+});
+
+const RESULTS = [
+  { url: "https://a.dev/", title: "A dev", snippet: "The A site.", position: 1, document: { url: "https://a.dev/", markdown: "# A" } },
+  { url: "https://b.dev/", title: "B dev", position: 2 },
+];
+
+describe("search", () => {
+  it("prints ranked results and sends query options", async () => {
+    const h = await harness({ "POST /v1/search": () => json({ success: true, results: RESULTS.map(({ document: _, ...r }) => r), credits_used: 5, request_id: "r" }) });
+    const r = await h.exec("search", "web", "scraping", "api", "--limit", "5", "--country", "us", "--language", "en", "--time", "week");
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("1. A dev\n   https://a.dev/\n   The A site.\n\n2. B dev\n   https://b.dev/\n");
+    expect(r.stderr).toContain("2 results");
+    const req = h.calls[0]!;
+    expect(await req.clone().json()).toEqual({ query: "web scraping api", limit: 5, country: "us", language: "en", timeRange: "week" });
+    expect(req.headers.get("idempotency-key")).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("--scrape (or any -f) scrapes each result and prints its markdown", async () => {
+    const h = await harness({ "POST /v1/search": () => json({ success: true, results: RESULTS, credits_used: 6, request_id: "r" }) });
+    const r = await h.exec("search", "a dev", "--scrape");
+    expect(r.stdout).toContain("# A");
+    expect(r.stderr).toContain("2 results, 1 scraped");
+    expect((await h.calls[0]!.json()).scrapeOptions).toEqual({});
+    await h.exec("search", "a dev", "-f", "markdown,links");
+    expect((await h.calls[1]!.json()).scrapeOptions).toEqual({ formats: ["markdown", "links"] });
+  });
+
+  it("rejects a missing query and a bad --time without calling the API", async () => {
+    const h = await harness({});
+    expect((await h.exec("search")).code).toBe(EXIT.usage);
+    expect((await h.exec("search", "q", "--time", "decade")).code).toBe(EXIT.usage);
+    expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe("extract", () => {
+  const ok = () => json({ success: true, data: { name: "Acme", price: 9 }, sources: [{ url: "https://a.dev/p", ok: true }, { url: "https://a.dev/x", ok: false, error: "blocked_by_site" }], credits_used: 15, request_id: "r" });
+
+  it("prints the data as JSON, notes skipped URLs, and waits long enough", async () => {
+    const h = await harness({ "POST /v1/extract": ok });
+    const r = await h.exec("extract", "https://a.dev/p", "https://a.dev/x", "-p", "name and price");
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual({ name: "Acme", price: 9 });
+    expect(r.stderr).toContain("skipped https://a.dev/x (blocked_by_site)");
+    expect(r.stderr).toContain("1 of 2 URLs read");
+    const req = h.calls[0]!;
+    expect(await req.clone().json()).toEqual({ urls: ["https://a.dev/p", "https://a.dev/x"], prompt: "name and price" });
+    expect(req.headers.get("idempotency-key")).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("reads --schema inline, from a file or from stdin", async () => {
+    const h = await harness({ "POST /v1/extract": ok }, { stdin: '{"type":"object","properties":{"price":{"type":"number"}}}' });
+    const schema = { type: "object", properties: { name: { type: "string" } } };
+    await h.exec("extract", "https://a.dev/p", "-s", JSON.stringify(schema));
+    const file = join(h.dir, "schema.json");
+    await writeFile(file, JSON.stringify(schema));
+    await h.exec("extract", "https://a.dev/p", "--schema", file);
+    await h.exec("extract", "https://a.dev/p", "--schema", "-");
+    const bodies = await Promise.all(h.calls.map((c) => c.json()));
+    expect(bodies[0].schema).toEqual(schema);
+    expect(bodies[1].schema).toEqual(schema);
+    expect(bodies[2].schema).toEqual({ type: "object", properties: { price: { type: "number" } } });
+  });
+
+  it("--json prints the whole response", async () => {
+    const h = await harness({ "POST /v1/extract": ok });
+    const r = await h.exec("extract", "https://a.dev/p", "-p", "x", "--json");
+    expect(JSON.parse(r.stdout)).toMatchObject({ data: { name: "Acme" }, sources: [{ ok: true }, { ok: false }], creditsUsed: 15 });
+  });
+
+  it("usage errors: no URL, no prompt or schema, bad schema, too many URLs", async () => {
+    const h = await harness({});
+    expect((await h.exec("extract", "-p", "x")).code).toBe(EXIT.usage);
+    expect((await h.exec("extract", "https://a.dev")).code).toBe(EXIT.usage);
+    expect((await h.exec("extract", "https://a.dev", "-s", "{nope")).code).toBe(EXIT.usage);
+    expect((await h.exec("extract", "https://a.dev", "-s", "[1]")).code).toBe(EXIT.usage);
+    expect((await h.exec("extract", "https://a.dev", "-s", join(h.dir, "missing.json"))).code).toBe(EXIT.usage);
+    const many = Array.from({ length: 26 }, (_, i) => `https://a.dev/${i}`);
+    expect((await h.exec("extract", ...many, "-p", "x")).code).toBe(EXIT.usage);
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it("extract_failed exits 8 with a hint; the daily allowance gets its own hint", async () => {
+    const h = await harness({ "POST /v1/extract": () => apiError(422, "extract_failed", "no match") });
+    const r = await h.exec("extract", "https://a.dev/p", "-p", "x");
+    expect(r.code).toBe(EXIT.extractFailed);
+    expect(r.stderr).toMatch(/schema can be satisfied/);
+    const capped = await harness({ "POST /v1/extract": () => apiError(429, "rate_limited", "This organization has had 25 failed extracts today") });
+    const c = await capped.exec("extract", "https://a.dev/p", "-p", "x");
+    expect(c.code).toBe(EXIT.retry);
+    expect(c.stderr).toMatch(/resets at midnight UTC/);
   });
 });
 

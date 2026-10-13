@@ -20,6 +20,8 @@ export const EXIT = {
   target: 6,
   /** Unknown crawl id or resource. */
   notFound: 7,
+  /** Extract: the model couldn't produce data matching the schema (0 credits). */
+  extractFailed: 8,
   /** Interrupted (Ctrl-C). */
   interrupted: 130,
 } as const;
@@ -39,6 +41,7 @@ const BY_CODE: Record<string, number> = {
   timeout: EXIT.target,
   unsupported_content: EXIT.target,
   not_found: EXIT.notFound,
+  extract_failed: EXIT.extractFailed,
   invalid_request: EXIT.usage,
 };
 
@@ -71,8 +74,12 @@ export function hintFor(err: unknown): string | undefined {
     case "spend_cap_reached":
       return "Raise the spend cap at https://vermin.dev/dashboard/billing";
     case "rate_limited":
+      if (/failed extracts/i.test(err.message)) return "The organization's daily allowance of failed extracts is used up. It resets at midnight UTC.";
+      return err.retryAfterMs ? `Retry in ${Math.ceil(err.retryAfterMs / 1000)}s.` : "Retry shortly.";
     case "capacity_exceeded":
       return err.retryAfterMs ? `Retry in ${Math.ceil(err.retryAfterMs / 1000)}s.` : "Retry shortly.";
+    case "extract_failed":
+      return "Check that the pages contain this data and that the schema can be satisfied. It cost 0 credits.";
     case "blocked_by_site":
       return "The site blocked the request. Try `--tier render`. It cost 0 credits.";
     default:
