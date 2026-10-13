@@ -13,6 +13,8 @@ Commands:
   crawl <url>            Crawl a site and stream every page
   crawl status <id>      Show a crawl's progress and pages
   crawl cancel <id>      Stop a crawl
+  search <query>         Search the web, optionally scraping each result
+  extract <url...>       Typed JSON from pages, by --prompt and/or --schema
   brand <domain>         Logo, colours, fonts and socials for a company
   login                  Save an API key for this user
   logout                 Remove the saved key
@@ -29,7 +31,7 @@ Global options:
 
 Results go to stdout; credits used and progress go to stderr. Failed pages cost 0 credits.
 Exit codes: 0 ok, 1 error, 2 usage, 3 auth/permission, 4 credits/budget,
-5 rate limited (retry), 6 target page unreadable, 7 not found.
+5 rate limited (retry), 6 target page unreadable, 7 not found, 8 extract failed.
 
 Keys: https://vermin.dev/dashboard/api-keys · Docs: https://vermin.dev/docs/cli
 `;
@@ -88,6 +90,44 @@ With --json, prints one JSON object per line (NDJSON): {"type":"page",...} then 
 Examples:
   vermin crawl https://docs.example.com --limit 200 --include "/guides/**" -o ./docs
   vermin crawl https://example.com --json | jq -r 'select(.type=="page") | .data.url'
+`,
+  search: `Usage: vermin search <query> [options]
+
+Searches the web. Prints ranked results (title, URL, snippet). With --scrape,
+each result is also scraped and its markdown printed below it.
+5 credits per 10 results (at least 5), plus 1 per scraped result.
+
+  -l, --limit <n>        Results, 1-50 (default 10)
+  --country <code>       Two-letter country, e.g. us, de
+  --language <code>      Language, e.g. en, pt-BR
+  --time <range>         day, week, month, year
+  --scrape               Scrape every result (any -f also turns this on)
+${SCRAPE_FLAGS}
+  -o, --output <file>    Write the result to a file
+
+Examples:
+  vermin search "web scraping api pricing" --limit 5
+  vermin search "rust async runtime" --scrape --json | jq -r '.results[].document.markdown'
+`,
+  extract: `Usage: vermin extract <url...> [options]
+
+Reads 1-25 pages and prints one JSON value built from them. With --schema, the
+result is validated against it. 15 credits per URL read; a failed extract is free.
+
+  -p, --prompt <text>    What to extract, in plain words
+  -s, --schema <schema>  JSON Schema: a file, inline JSON, or - for stdin
+  --tier <tier>          auto (default), fetch, render
+  --full-page            Keep navs, footers and other boilerplate
+  --wait-for <ms>        Wait after the page loads (rendered pages)
+  --ignore-robots        Don't check robots.txt
+  -o, --output <file>    Write the result to a file
+
+Waits up to 3 minutes by default (--timeout to change). URLs that couldn't be
+read are listed on stderr. --json prints the full response, with sources.
+
+Examples:
+  vermin extract https://example.com/pricing -p "every plan and its monthly price"
+  vermin extract https://shop.example/a https://shop.example/b -s product.schema.json
 `,
   brand: `Usage: vermin brand <domain> [options]
 

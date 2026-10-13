@@ -1,6 +1,6 @@
 # Vermin CLI
 
-Turn any website into clean, LLM-ready markdown and brand data from your terminal, scripts or AI agent.
+Turn any website into clean, LLM-ready markdown, search results, structured JSON and brand data from your terminal, scripts or AI agent.
 
 ```bash
 npx @vermin/cli scrape https://example.com
@@ -34,6 +34,8 @@ The key is checked against the API (free) and saved to `~/.config/vermin/config.
 | `vermin map <url>` | Every URL on a site, one per line; `--search` ranks them | 3 per 10 fetches |
 | `vermin crawl <url>` | Crawl a site and stream every page; `-o dir` writes one file per page | 1 per page |
 | `vermin crawl status <id>` / `cancel <id>` | Follow or stop a crawl | free |
+| `vermin search <query>` | Ranked web results; `--scrape` adds each result's markdown | 5 per 10 results (at least 5), +1 per scraped result |
+| `vermin extract <url...>` | One JSON value from 1-25 pages, by `--prompt` and/or `--schema` | 15 per URL read; failed extracts are free |
 | `vermin brand <domain>` | Logo, colours, fonts and socials | 5, 1 cached |
 | `vermin login` / `logout` / `whoami` | Manage the saved key | free |
 
@@ -43,6 +45,9 @@ Failed pages always cost 0 credits. Run `vermin <command> --help` for every flag
 vermin scrape https://docs.example.com/guide -o guide.md
 vermin map https://docs.example.com --search "rate limits" --limit 10
 vermin crawl https://docs.example.com --limit 200 --include "/guides/**" -o ./docs
+vermin search "rust async runtime" --limit 5 --scrape
+vermin extract https://example.com/pricing -p "every plan and its monthly price"
+vermin extract https://shop.example/a https://shop.example/b -s product.schema.json
 vermin brand stripe.com --json | jq .data.colors
 ```
 
@@ -62,7 +67,9 @@ vermin brand stripe.com --json | jq .data.colors
   | 5 | Rate limited or busy: retry later |
   | 6 | The page couldn't be read (blocked, unreachable, timed out, unsupported) |
   | 7 | Not found (e.g. unknown crawl id) |
+  | 8 | Extract couldn't match the schema (0 credits) |
 
+- **Retries are safe.** `search` and `extract` send an `Idempotency-Key`, so a retried call is never charged twice. `extract` waits up to 3 minutes by default (`--timeout` to change).
 - **Least privilege:** give an agent its own key with a credit budget and only the permissions it needs ([docs](https://vermin.dev/docs/authentication)).
 
 ## Environment

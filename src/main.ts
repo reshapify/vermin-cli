@@ -1,7 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
-import { Vermin, VerminError, type Document } from "@vermin/sdk";
+import { Vermin, VerminError, type Document, type RequestOptions } from "@vermin/sdk";
 import { brandMarkdown, documentBody, documentHeader, footer } from "@vermin/sdk/format";
 import { KEY_PATTERN, configPath, deleteConfigKey, maskKey, readConfig, resolveKey, writeConfig } from "./config.js";
 import { EXIT, UsageError, exitCodeFor, hintFor } from "./errors.js";
@@ -59,6 +60,11 @@ function oneOf<T extends string>(v: unknown, flag: string, allowed: readonly T[]
 const list = (v: unknown): string[] | undefined =>
   v === undefined ? undefined : (Array.isArray(v) ? v : [v]).flatMap((s) => String(s).split(",")).map((s) => s.trim()).filter(Boolean);
 
+const TIME_RANGES = ["day", "week", "month", "year"] as const;
+/** Search scrapes results within 45 s; the API gives extract up to 150 s. Wait a little longer unless --timeout says otherwise. */
+const SEARCH_TIMEOUT_MS = 75_000;
+const EXTRACT_TIMEOUT_MS = 180_000;
+
 const FORMATS = ["markdown", "html", "rawHtml", "text", "links", "screenshot", "screenshotFull", "chunks", "metadata", "brand"] as const;
 const TIERS = ["auto", "fetch", "render", "premium"] as const;
 
@@ -95,6 +101,17 @@ class Ctx {
   }
   get req() {
     return this.io.signal ? { signal: this.io.signal } : undefined;
+  }
+  /** Request options for a call that may run long and must not be charged twice when retried. */
+  slowReq(defaultTimeoutMs: number): RequestOptions {
+    const key = randomUUID();
+    return {
+      ...this.req,
+      // SDK 0.2.0 only sends idempotencyKey for scrape and crawl, so set the header too.
+      idempotencyKey: key,
+      headers: { "Idempotency-Key": key },
+      timeoutMs: int(this.opts.timeout, "timeout", 1) ?? defaultTimeoutMs,
+    };
   }
 }
 
@@ -184,6 +201,28 @@ function docMarkdown(doc: Document): string {
   return [documentHeader(doc), body, shots].filter(Boolean).join("\n\n");
 }
 
+/** A JSON Schema from --schema: inline JSON, a file path, or "-" for stdin. */
+async function readSchema(value: string, io: IO): Promise<Record<string, unknown>> {
+  const text = value === "-" ? await io.readStdin() : value.trimStart().startsWith("{") ? value : await readFile(value, "utf8").catch(() => {
+    throw new UsageError(`--schema: can't read "${value}". Pass a file, inline JSON, or "-" for stdin.`);
+  });
+  let schema: unknown;
+  try {
+    schema = JSON.parse(text);
+  } catch {
+    throw new UsageError("--schema isn't valid JSON.");
+  }
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw new UsageError("--schema must be a JSON object (a JSON Schema).");
+  return schema as Record<string, unknown>;
+}
+
+async function emit(ctx: Ctx, text: string) {
+  if (ctx.opts.output) {
+    await save(ctx.opts.output as string, text);
+    ctx.note(`Saved ${ctx.opts.output}`);
+  } else ctx.out(text);
+}
+
 async function save(path: string, content: string) {
   await writeFile(path, content.endsWith("\n") ? content : `${content}\n`);
 }
@@ -232,6 +271,83 @@ const COMMANDS: Record<string, Command> = {
       if (ctx.json) ctx.emitJson(r);
       else ctx.out(r.links.map((l) => l.url).join("\n"));
       ctx.note(footer(r.creditsUsed, r.requestId, `${r.links.length} URLs${r.budgetLimited ? " (stopped at the credit budget)" : ""}`));
+    },
+  },
+
+  search: {
+    options: {
+      ...scrapeOptions,
+      limit: { type: "string", short: "l" },
+      country: { type: "string" },
+      language: { type: "string" },
+      time: { type: "string" },
+      scrape: { type: "boolean" },
+    },
+    async run(ctx, pos) {
+      const query = pos.join(" ").trim();
+      if (!query) throw new UsageError(`Missing query. Usage: ${commandHelp("search").split("\n")[0]!.replace(/^Usage: /, "")}`);
+      const o = ctx.opts;
+      const scrape = o.scrape === true || o.formats !== undefined;
+      const vermin = await ctx.client();
+      const r = await vermin.search(
+        {
+          query,
+          ...(o.limit !== undefined ? { limit: int(o.limit, "limit", 1) } : {}),
+          ...(o.country !== undefined ? { country: o.country as string } : {}),
+          ...(o.language !== undefined ? { language: o.language as string } : {}),
+          ...(o.time !== undefined ? { timeRange: oneOf(o.time, "time", TIME_RANGES) } : {}),
+          ...(scrape ? { scrapeOptions: scrapeParams(o) } : {}),
+        },
+        ctx.slowReq(SEARCH_TIMEOUT_MS),
+      );
+      const text = ctx.json
+        ? JSON.stringify(r, null, 2)
+        : r.results
+            .map((h, i) => {
+              const lines = [`${h.position ?? i + 1}. ${h.title}`, `   ${h.url}`];
+              if (h.snippet) lines.push(`   ${h.snippet}`);
+              if (h.document) lines.push("", docMarkdown(h.document));
+              return lines.join("\n");
+            })
+            .join(scrape ? "\n\n---\n\n" : "\n\n");
+      await emit(ctx, text || "(no results)");
+      const scraped = r.results.filter((h) => h.document).length;
+      ctx.note(footer(r.creditsUsed, r.requestId, `${r.results.length} results${scrape ? `, ${scraped} scraped` : ""}`));
+    },
+  },
+
+  extract: {
+    options: {
+      prompt: { type: "string", short: "p" },
+      schema: { type: "string", short: "s" },
+      tier: scrapeOptions.tier,
+      "wait-for": scrapeOptions["wait-for"],
+      "full-page": scrapeOptions["full-page"],
+      "ignore-robots": scrapeOptions["ignore-robots"],
+      output: scrapeOptions.output,
+    },
+    async run(ctx, urls) {
+      if (!urls.length) throw new UsageError(`Missing URL. Usage: ${commandHelp("extract").split("\n")[0]!.replace(/^Usage: /, "")}`);
+      if (urls.length > 25) throw new UsageError("At most 25 URLs per extract.");
+      const o = ctx.opts;
+      const prompt = (o.prompt as string | undefined)?.trim();
+      const schema = o.schema !== undefined ? await readSchema(o.schema as string, ctx.io) : undefined;
+      if (!prompt && !schema) throw new UsageError("Give --prompt, --schema, or both, describing what to extract.");
+      const scrapeOpts = scrapeParams(o);
+      const vermin = await ctx.client();
+      const r = await vermin.extract(
+        {
+          urls,
+          ...(prompt ? { prompt } : {}),
+          ...(schema ? { schema } : {}),
+          ...(Object.keys(scrapeOpts).length ? { scrapeOptions: scrapeOpts } : {}),
+        },
+        ctx.slowReq(EXTRACT_TIMEOUT_MS),
+      );
+      await emit(ctx, JSON.stringify(ctx.json ? r : r.data, null, 2));
+      for (const s of r.sources ?? []) if (s.ok === false) ctx.note(`  skipped ${s.url}${"error" in s && s.error ? ` (${s.error})` : ""}`);
+      const ok = (r.sources ?? []).filter((s) => s.ok !== false).length;
+      ctx.note(footer(r.creditsUsed, r.requestId, `${ok} of ${urls.length} URLs read`));
     },
   },
 
