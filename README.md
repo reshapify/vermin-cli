@@ -51,6 +51,24 @@ vermin extract https://shop.example/a https://shop.example/b -s product.schema.j
 vermin brand stripe.com --json | jq .data.colors
 ```
 
+### Screenshots
+
+With `-f screenshot` (or `screenshotFull`), these flags control the capture. They work on `scrape`, `crawl` and `search`.
+
+| Flag | What it does |
+| --- | --- |
+| `--viewport <WxH>` | Browser window in CSS pixels, each 240-3840 (default `1280x800`) |
+| `--scale <n>` | Pixel ratio, 1-3: `2` gives a retina image. Needs `--viewport`; width and height × scale must each be at most 7680 |
+| `--mobile` | Mobile emulation: the page's meta viewport and touch. Needs `--viewport` |
+| `--selector <css>` | Capture only the first matching element. Only with `-f screenshot`, not `screenshotFull` |
+
+```bash
+vermin scrape https://vermin.dev -f screenshot --viewport 390x844 --scale 3 --mobile
+vermin scrape https://example.com/pricing -f screenshot --selector "#plans"
+```
+
+Using any of these without a screenshot format exits with code 2.
+
 ## For scripts and agents
 
 - **Results on stdout, everything else on stderr.** Credits used, request ids and progress go to stderr, so `vermin scrape … > page.md` captures only the page. `-q` silences stderr.
