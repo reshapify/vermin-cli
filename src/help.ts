@@ -41,7 +41,11 @@ const SCRAPE_FLAGS = `  -f, --formats <list>   markdown,html,rawHtml,text,links,
   --full-page            Keep navs, footers and other boilerplate
   --wait-for <ms>        Wait after the page loads (rendered pages)
   --max-age <ms>         Accept a cached result up to this age (0 = always fresh)
-  --ignore-robots        Don't check robots.txt`;
+  --ignore-robots        Don't check robots.txt
+  --viewport <WxH>       Screenshot window in CSS pixels, e.g. 390x844 (default 1280x800)
+  --scale <n>            Screenshot pixel ratio, 1-3 (needs --viewport)
+  --mobile               Emulate a phone: meta viewport and touch (needs --viewport)
+  --selector <css>       Screenshot only the first matching element (-f screenshot)`;
 
 const COMMAND_HELP: Record<string, string> = {
   scrape: `Usage: vermin scrape <url> [options]
@@ -54,6 +58,8 @@ ${SCRAPE_FLAGS}
 Examples:
   vermin scrape https://example.com
   vermin scrape https://example.com -f markdown,links --json | jq .data.links
+  vermin scrape https://vermin.dev -f screenshot --viewport 390x844 --scale 3 --mobile
+  vermin scrape https://example.com/pricing -f screenshot --selector "#plans"
 `,
   map: `Usage: vermin map <url> [options]
 

@@ -94,6 +94,50 @@ describe("scrape", () => {
     await h.exec("scrape", "https://example.com", "-o", file);
     expect(await readFile(file, "utf8")).toContain("# Example Domain");
   });
+
+  it("maps --viewport, --scale, --mobile and --selector to screenshotOptions", async () => {
+    const h = await harness({
+      "POST /v1/scrape": () => json({ success: true, data: DOC, credits_used: 1, request_id: "r" }),
+      "POST /v1/search": () => json({ success: true, results: [], credits_used: 5, request_id: "r" }),
+    });
+    expect((await h.exec("scrape", "https://vermin.dev", "-f", "screenshot", "--viewport", "390x844", "--scale", "3", "--mobile", "--selector", "header nav")).code).toBe(0);
+    expect(await h.calls[0]!.clone().text()).toBe(
+      JSON.stringify({
+        url: "https://vermin.dev",
+        formats: ["screenshot"],
+        screenshotOptions: { viewport: { width: 390, height: 844, deviceScaleFactor: 3, mobile: true }, selector: "header nav" },
+      }),
+    );
+    await h.exec("scrape", "https://a.dev", "-f", "screenshotFull", "--viewport", "1920x1080");
+    expect((await h.calls[1]!.json()).screenshotOptions).toEqual({ viewport: { width: 1920, height: 1080 } });
+    await h.exec("scrape", "https://a.dev", "-f", "screenshot");
+    expect(await h.calls[2]!.json()).not.toHaveProperty("screenshotOptions");
+    await h.exec("search", "a dev", "-f", "screenshot", "--selector", "#plans");
+    expect((await h.calls[3]!.json()).scrapeOptions).toEqual({ formats: ["screenshot"], screenshotOptions: { selector: "#plans" } });
+  });
+
+  it("exits 2 on bad screenshot flags without calling the API", async () => {
+    const h = await harness({});
+    const noFormat = await h.exec("scrape", "https://a.dev", "--viewport", "390x844");
+    expect(noFormat.code).toBe(EXIT.usage);
+    expect(noFormat.stderr).toContain("-f screenshot");
+    for (const args of [
+      ["-f", "markdown", "--selector", "#a"],
+      ["-f", "screenshot", "--viewport", "390"],
+      ["-f", "screenshot", "--viewport", "390x844.5"],
+      ["-f", "screenshot", "--viewport", "100x844"],
+      ["-f", "screenshot", "--viewport", "390x844", "--scale", "4"],
+      ["-f", "screenshot", "--viewport", "3000x844", "--scale", "3"],
+      ["-f", "screenshot", "--scale", "2"],
+      ["-f", "screenshot", "--mobile"],
+      ["-f", "screenshotFull", "--selector", "#a"],
+    ]) {
+      expect((await h.exec("scrape", "https://a.dev", ...args)).code, args.join(" ")).toBe(EXIT.usage);
+    }
+    expect((await h.exec("search", "q", "--mobile", "--viewport", "390x844")).code).toBe(EXIT.usage);
+    expect((await h.exec("crawl", "https://a.dev", "--selector", "#a")).code).toBe(EXIT.usage);
+    expect(h.calls).toHaveLength(0);
+  });
 });
 
 describe("map and brand", () => {

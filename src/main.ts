@@ -179,8 +179,54 @@ const scrapeOptions = {
   "wait-for": { type: "string" },
   "full-page": { type: "boolean" },
   "ignore-robots": { type: "boolean" },
+  viewport: { type: "string" },
+  scale: { type: "string" },
+  mobile: { type: "boolean" },
+  selector: { type: "string" },
   output: { type: "string", short: "o" },
 } as const satisfies ParseArgsConfig["options"];
+
+/** The API's `screenshotOptions`, typed locally so the CLI doesn't need a newer @vermin/sdk. */
+interface ScreenshotOptions {
+  viewport?: { width: number; height: number; deviceScaleFactor?: number; mobile?: boolean };
+  selector?: string;
+}
+
+const MAX_SCREENSHOT_PIXELS = 7680;
+
+function screenshotParams(o: Opts, formats: string[] | undefined): { screenshotOptions?: ScreenshotOptions } {
+  const set = [o.viewport !== undefined && "--viewport", o.scale !== undefined && "--scale", o.mobile && "--mobile", o.selector !== undefined && "--selector"].filter(
+    (f): f is string => typeof f === "string",
+  );
+  if (!set.length) return {};
+  const shot = formats?.includes("screenshot");
+  const full = formats?.includes("screenshotFull");
+  if (!shot && !full) throw new UsageError(`${set.join(", ")} ${set.length > 1 ? "need" : "needs"} a screenshot: add -f screenshot (or screenshotFull).`);
+  const screenshotOptions: ScreenshotOptions = {};
+  if (o.viewport !== undefined) {
+    const m = /^(\d+)x(\d+)$/i.exec(String(o.viewport).trim());
+    if (!m) throw new UsageError("--viewport must be WIDTHxHEIGHT in CSS pixels, e.g. 390x844");
+    const [width, height] = [Number(m[1]), Number(m[2])];
+    if ([width, height].some((n) => n < 240 || n > 3840)) throw new UsageError("--viewport width and height must each be 240-3840");
+    screenshotOptions.viewport = { width, height };
+    if (o.scale !== undefined) {
+      const scale = Number(o.scale);
+      if (!Number.isFinite(scale) || scale < 1 || scale > 3) throw new UsageError("--scale must be a number from 1 to 3");
+      if (Math.max(width, height) * scale > MAX_SCREENSHOT_PIXELS) throw new UsageError(`--viewport × --scale must be at most ${MAX_SCREENSHOT_PIXELS} pixels each way`);
+      screenshotOptions.viewport.deviceScaleFactor = scale;
+    }
+    if (o.mobile) screenshotOptions.viewport.mobile = true;
+  } else if (o.scale !== undefined || o.mobile) {
+    throw new UsageError("--scale and --mobile need --viewport WIDTHxHEIGHT, e.g. --viewport 390x844");
+  }
+  if (o.selector !== undefined) {
+    const selector = String(o.selector);
+    if (!selector || selector.length > 1000) throw new UsageError("--selector must be 1-1000 characters");
+    if (full) throw new UsageError("--selector works with -f screenshot, not screenshotFull");
+    screenshotOptions.selector = selector;
+  }
+  return { screenshotOptions };
+}
 
 function scrapeParams(o: Opts) {
   const formats = list(o.formats);
@@ -192,6 +238,7 @@ function scrapeParams(o: Opts) {
     ...(o["wait-for"] !== undefined ? { waitFor: int(o["wait-for"], "wait-for") } : {}),
     ...(o["full-page"] ? { onlyMainContent: false } : {}),
     ...(o["ignore-robots"] ? { ignoreRobots: true } : {}),
+    ...screenshotParams(o, formats),
   };
 }
 
@@ -232,8 +279,9 @@ const COMMANDS: Record<string, Command> = {
     options: scrapeOptions,
     async run(ctx, pos) {
       const url = needArg(pos, "URL", "scrape");
+      const params = scrapeParams(ctx.opts);
       const vermin = await ctx.client();
-      const r = await vermin.scrape({ url, ...scrapeParams(ctx.opts) }, ctx.req);
+      const r = await vermin.scrape({ url, ...params }, ctx.req);
       const text = ctx.json ? JSON.stringify(r, null, 2) : docMarkdown(r.data);
       if (ctx.opts.output) {
         await save(ctx.opts.output as string, text);
@@ -288,6 +336,7 @@ const COMMANDS: Record<string, Command> = {
       if (!query) throw new UsageError(`Missing query. Usage: ${commandHelp("search").split("\n")[0]!.replace(/^Usage: /, "")}`);
       const o = ctx.opts;
       const scrape = o.scrape === true || o.formats !== undefined;
+      const params = scrapeParams(o);
       const vermin = await ctx.client();
       const r = await vermin.search(
         {
@@ -296,7 +345,7 @@ const COMMANDS: Record<string, Command> = {
           ...(o.country !== undefined ? { country: o.country as string } : {}),
           ...(o.language !== undefined ? { language: o.language as string } : {}),
           ...(o.time !== undefined ? { timeRange: oneOf(o.time, "time", TIME_RANGES) } : {}),
-          ...(scrape ? { scrapeOptions: scrapeParams(o) } : {}),
+          ...(scrape ? { scrapeOptions: params } : {}),
         },
         ctx.slowReq(SEARCH_TIMEOUT_MS),
       );
@@ -379,6 +428,7 @@ const COMMANDS: Record<string, Command> = {
       if (pos[0] === "status" || pos[0] === "cancel") return crawlJob(ctx, pos[0], pos.slice(1));
       const url = needArg(pos, "URL", "crawl");
       const o = ctx.opts;
+      const scrapeOpts = scrapeParams(o);
       const vermin = await ctx.client();
       const job = await vermin.crawl.start(
         {
@@ -389,7 +439,7 @@ const COMMANDS: Record<string, Command> = {
           ...(list(o.exclude) ? { excludePaths: list(o.exclude) } : {}),
           ...(o.sitemap !== undefined ? { sitemap: oneOf(o.sitemap, "sitemap", ["include", "skip", "only"] as const) } : {}),
           ...(o.subdomains ? { allowSubdomains: true } : {}),
-          ...(Object.keys(scrapeParams(o)).length ? { scrapeOptions: scrapeParams(o) } : {}),
+          ...(Object.keys(scrapeOpts).length ? { scrapeOptions: scrapeOpts } : {}),
         },
         ctx.req,
       );
